@@ -9,9 +9,11 @@ class DefaultFirebaseOptions {
     switch (defaultTargetPlatform) {
       case TargetPlatform.android:
         return android;
+      case TargetPlatform.iOS:
+        return ios;
       default:
         throw UnsupportedError(
-          'Firebase is only configured for Web and Android right now.',
+          'Firebase is only configured for Web, Android, and iOS right now.',
         );
     }
   }
@@ -34,5 +36,15 @@ class DefaultFirebaseOptions {
     projectId: 'bluefield-f9eb9',
     databaseURL: 'https://bluefield-f9eb9-default-rtdb.firebaseio.com',
     storageBucket: 'bluefield-f9eb9.firebasestorage.app',
+  );
+
+  static const FirebaseOptions ios = FirebaseOptions(
+    apiKey: 'AIzaSyBkM2Iake54pYfOYgq2UGX3VOnuCMeYTys',
+    appId: '1:903012762212:ios:aaebe64be5eab0f3c49571',
+    messagingSenderId: '903012762212',
+    projectId: 'bluefield-f9eb9',
+    databaseURL: 'https://bluefield-f9eb9-default-rtdb.firebaseio.com',
+    storageBucket: 'bluefield-f9eb9.firebasestorage.app',
+    iosBundleId: 'com.bluejaytechnologies.bluefield',
   );
 }
