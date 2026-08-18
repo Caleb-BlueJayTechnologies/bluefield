@@ -20,9 +20,18 @@ workflows:
         script: |
           flutter emulators --launch apple_ios_simulator
           sleep 15
+          # `-d ios` isn't a valid device selector — Flutter needs the
+          # actual booted simulator's name or UDID, and Codemagic doesn't
+          # guarantee which iPhone model that'll be from run to run. Grab
+          # whatever actually booted and pass its UDID to the next step
+          # via $CM_ENV (Codemagic's mechanism for sharing variables
+          # between script steps).
+          SIMULATOR_ID=$(xcrun simctl list devices booted | grep -Eo '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}' | head -n 1)
+          echo "Booted simulator UDID: $SIMULATOR_ID"
+          echo "SIMULATOR_ID=$SIMULATOR_ID" >> $CM_ENV
       - name: Run the launch smoke test
         script: |
-          flutter test integration_test/app_smoke_test.dart -d ios
+          flutter test integration_test/app_smoke_test.dart -d "$SIMULATOR_ID"
     artifacts:
       - build/ios/**/*.png
       - flutter_drive.log
