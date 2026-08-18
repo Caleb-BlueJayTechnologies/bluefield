@@ -7,6 +7,12 @@ workflows:
       flutter: stable
       xcode: latest
       cocoapods: default
+      groups:
+        # Must match the group name you create in Codemagic's UI when
+        # adding the TEST_EMAIL / TEST_PASSWORD environment variables —
+        # variables aren't pulled into the build unless their group is
+        # listed here.
+        - test_credentials
     scripts:
       - name: Get Flutter packages
         script: |
