@@ -1,0 +1,528 @@
+rules_version = '2';
+
+// ============================================================================
+// BlueField Firestore Security Rules
+// ============================================================================
+// Design philosophy: these rules enforce the REAL security boundary —
+// authentication, company membership, and role TIER (owner > manager >
+// employee) — not the app's full fine-grained permission matrix (jobs.create,
+// vehicles.assign, etc. — see permission_service.dart). Replicating 20+
+// granular permissions in declarative rules would be fragile, hard to keep in
+// sync with PermissionService as it evolves, and isn't what rules are good at.
+//
+// What THESE rules guarantee, unconditionally, no matter what the client app
+// does or how it's compromised:
+//   - A user can never read or write another company's data.
+//   - A non-member can never read a company's data at all.
+//   - An employee can never grant themselves (or anyone) a higher role.
+//   - An employee can never modify another employee's core data.
+//   - A company can never see another company's support tickets.
+//   - Only the designated platform admin(s) can ever touch the Admin Panel
+//     collections, no matter what the client claims.
+//
+// What stays enforced app-side (in the various *_service.dart files), same
+// as it already is: the finer distinctions like "can THIS manager edit
+// vehicles" vs "can THIS manager edit jobs" — those differences are real but
+// low-stakes (a manager acting slightly outside their configured permissions
+// is an access-control nuance, not a data-isolation breach).
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function membershipPath(companyId) {
+      return /databases/$(database)/documents/companies/$(companyId)/memberships/$(request.auth.uid);
+    }
+
+    function isMember(companyId) {
+      return isSignedIn() &&
+        exists(membershipPath(companyId)) &&
+        get(membershipPath(companyId)).data.status == 'active';
+    }
+
+    function myRole(companyId) {
+      return get(membershipPath(companyId)).data.role;
+    }
+
+    function isOwner(companyId) {
+      return isMember(companyId) && myRole(companyId) == 'owner';
+    }
+
+    function isManagerOrOwner(companyId) {
+      return isMember(companyId) &&
+        (myRole(companyId) == 'owner' || myRole(companyId) == 'manager');
+    }
+
+    // Platform admin (BlueJay Admin Panel) — completely separate from
+    // company roles. A user can be Owner of ten companies and this is
+    // still false for them unless they have their own platformAdmins doc.
+    //
+    // IMPORTANT: this bootstrap email must be kept in sync BY HAND with
+    // PlatformAdminService.bootstrapSuperAdminEmail in the Dart code —
+    // rules can't import Dart constants. If you ever change one, change
+    // both, or the bootstrap account's self-healing write will start
+    // failing silently again (the exact bug chased earlier).
+    function bootstrapAdminEmail() {
+      return 'caleb.bluejaytech@gmail.com';
+    }
+
+    function isBootstrapAdmin() {
+      return isSignedIn() &&
+        request.auth.token.email != null &&
+        request.auth.token.email.lower() == bootstrapAdminEmail();
+    }
+
+    function platformAdminPath() {
+      return /databases/$(database)/documents/platformAdmins/$(request.auth.uid);
+    }
+
+    function isPlatformAdmin() {
+      return isBootstrapAdmin() ||
+        (isSignedIn() &&
+          exists(platformAdminPath()) &&
+          get(platformAdminPath()).data.active == true);
+    }
+
+    function isSuperAdmin() {
+      return isBootstrapAdmin() ||
+        (isSignedIn() &&
+          exists(platformAdminPath()) &&
+          get(platformAdminPath()).data.active == true &&
+          get(platformAdminPath()).data.role == 'superAdmin');
+    }
+
+    // ------------------------------------------------------------------
+    // users/{uid} — root account docs, one per Firebase Auth user
+    // ------------------------------------------------------------------
+    match /users/{uid} {
+      allow read: if isSignedIn() && (request.auth.uid == uid || isPlatformAdmin());
+      allow update: if isSignedIn() && request.auth.uid == uid;
+      // Two legitimate paths to creating a user doc: normal
+      // self-registration (request.auth.uid == uid), or a
+      // manager/owner onboarding a brand-new employee who isn't
+      // logged in yet to create their own doc — add_employee_screen.dart
+      // batches this write together with the membership/employee docs
+      // below, all under the ACTOR's own login, not the new hire's.
+      allow create: if isSignedIn() &&
+        (request.auth.uid == uid || isManagerOrOwner(request.resource.data.activeCompanyId));
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------------------
+    // Root: systemCounters/{counterId} — atomic counters (currently
+    // just the customer sequence number for the Founding Program)
+    // ------------------------------------------------------------------
+    match /systemCounters/{counterId} {
+      // Any signed-in user can increment this — same trust level
+      // already given to company registration itself (any signed-in
+      // user can create a company), since this counter is only ever
+      // touched as part of that same registration transaction. Worst
+      // case if abused is a wasted customer number, not a security or
+      // data-integrity issue.
+      allow read, write: if isSignedIn();
+    }
+
+    // ------------------------------------------------------------------
+    // Root: companyIdRegistry/{candidateId} — deliberately minimal,
+    // non-sensitive companion to companies/. See firestore_schema.dart's
+    // doc comment: exists purely so ID-availability checks work for a
+    // registrant who has no membership relationship to the candidate
+    // company yet (and might never have one, if the ID belongs to
+    // someone else's business). Opening the REAL companies collection
+    // up this broadly would leak every company's pricing, subscription
+    // status, and admin notes to any signed-in stranger — this registry
+    // holds none of that, just an ID existing.
+    // ------------------------------------------------------------------
+    match /companyIdRegistry/{candidateId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn();
+    }
+
+    // ------------------------------------------------------------------
+    // companies/{companyId}
+    // ------------------------------------------------------------------
+    match /companies/{companyId} {
+      allow read: if isMember(companyId) || isPlatformAdmin();
+      // Creation happens once during registration (CompanyService) —
+      // any signed-in user may create a new company doc; establishing
+      // themselves as its owner happens via the membership doc below,
+      // which is what actually grants them access to it afterward.
+      allow create: if isSignedIn();
+      // Platform admin actions (suspend, mark internal/test, edit
+      // notes, change pricing program) go through AdminCompanyService,
+      // which independently requires canManageCompanies (superAdmin)
+      // before ever attempting this write — this rule is the backstop,
+      // not the primary gate.
+      allow update: if isOwner(companyId) || isPlatformAdmin();
+      allow delete: if false;
+
+      // ---- memberships: role/status — the single most sensitive
+      // ---- collection in the whole schema. Only an owner may ever
+      // ---- change someone's role or status.
+      match /memberships/{userId} {
+        allow read: if isMember(companyId) || isPlatformAdmin();
+        // A brand-new company's very first membership doc (the
+        // registering owner creating themselves) can't check isOwner()
+        // yet — no membership exists to check against. Beyond that:
+        // owners can create a membership with ANY role; managers can
+        // onboard new employees/managers (matches employeesCreate
+        // being manager-level in the app's own permission matrix) but
+        // can never grant 'owner' — that boundary is enforced here,
+        // not just trusted from the client's role dropdown.
+        allow create: if isOwner(companyId) ||
+          (isManagerOrOwner(companyId) && request.resource.data.role != 'owner') ||
+          (isSignedIn() && request.auth.uid == userId && !exists(membershipPath(companyId)));
+        // Role/status CHANGES to an existing membership stay owner-only
+        // — this is the one place a manager genuinely can't act, even
+        // though they can create new employee memberships above.
+        allow update: if isOwner(companyId);
+        allow delete: if false; // archive via status field, never hard-delete
+      }
+
+      // ---- employees: HR profile data
+      match /employees/{employeeId} {
+        allow read: if isMember(companyId) || isPlatformAdmin();
+        // Normal path: a manager/owner creating/editing someone else's
+        // record. Self-heal path: anyone recreating their OWN record
+        // if it's gone missing (see EmployeeService.ensureEmployeeRecordExists)
+        // — without this, only a manager/owner could ever repair a
+        // missing record, leaving a regular employee stuck if their
+        // own doc were ever lost.
+        allow create: if isManagerOrOwner(companyId) ||
+          (isSignedIn() && request.auth.uid == employeeId);
+        // Normal path: manager/owner editing any field. Narrow
+        // self-update path: a user clearing their OWN
+        // requiresPasswordChange flag after actually changing their
+        // password (see AuthService.changePassword) — restricted via
+        // affectedKeys() to just that field (+ updatedAt) so this
+        // can't be used to self-edit jobTitle, crewId, or anything
+        // else that should stay manager/owner-controlled.
+        allow update: if isManagerOrOwner(companyId) ||
+          (isSignedIn() && request.auth.uid == employeeId &&
+            request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['requiresPasswordChange', 'updatedAt']));
+        allow delete: if false;
+      }
+
+      // ---- crews
+      match /crews/{crewId} {
+        allow read: if isMember(companyId);
+        allow create, update: if isManagerOrOwner(companyId);
+        allow delete: if false;
+      }
+
+      // ---- jobs + jobTemplates
+      match /jobs/{jobId} {
+        allow read: if isMember(companyId) || isPlatformAdmin();
+        allow create, update: if isManagerOrOwner(companyId);
+        allow delete: if false;
+      }
+      match /jobTemplates/{templateId} {
+        allow read: if isMember(companyId);
+        allow create, update, delete: if isManagerOrOwner(companyId);
+      }
+
+      // ---- schedules (calendar entries, including job-linked ones)
+      match /schedules/{scheduleId} {
+        allow read: if isMember(companyId);
+        allow create, update: if isManagerOrOwner(companyId);
+        allow delete: if isManagerOrOwner(companyId);
+      }
+
+      // ---- timeEntries: clock in/out records
+      match /timeEntries/{entryId} {
+        allow read: if isManagerOrOwner(companyId) ||
+          (isMember(companyId) && resource.data.employeeId == request.auth.uid);
+        // Employees create their own entries by clocking themselves in;
+        // managers can also create entries manually.
+        allow create: if isManagerOrOwner(companyId) ||
+          (isMember(companyId) && request.resource.data.employeeId == request.auth.uid);
+        // Employees may update their OWN entry (covers self clock-out)
+        // in addition to managers editing/locking/correcting any entry.
+        // Note: this is a v1 boundary — an employee could technically
+        // edit their own past entry directly rather than going through
+        // the app's correction-request flow. Tightening this further
+        // (e.g. only allowing specific field transitions) needs a
+        // Cloud Function, not declarative rules.
+        allow update: if isManagerOrOwner(companyId) ||
+          (isMember(companyId) && resource.data.employeeId == request.auth.uid);
+        allow delete: if false;
+      }
+
+      // ---- correctionRequests
+      match /correctionRequests/{requestId} {
+        allow read: if isManagerOrOwner(companyId) ||
+          (isMember(companyId) && resource.data.employeeId == request.auth.uid);
+        allow create: if isMember(companyId) && request.resource.data.employeeId == request.auth.uid;
+        // Review/approve/reject is manager+ only.
+        allow update: if isManagerOrOwner(companyId);
+        allow delete: if false;
+      }
+
+      // ---- payPeriods — financial data, owner only (matches
+      // ---- PayPeriodService's _requireOwner check exactly)
+      match /payPeriods/{periodId} {
+        allow read: if isManagerOrOwner(companyId);
+        allow create, update: if isOwner(companyId);
+        allow delete: if false;
+      }
+
+      // ---- payrollCycleSettings — the payroll schedule anchor
+      // (cycle type, first period start, overtime threshold). Same
+      // owner-only gate as payPeriods above.
+      match /payrollCycleSettings/{settingsId} {
+        allow read: if isManagerOrOwner(companyId);
+        allow create, update: if isOwner(companyId);
+        allow delete: if false;
+      }
+
+      // ---- timeOffRequests
+      match /timeOffRequests/{requestId} {
+        allow read: if isManagerOrOwner(companyId) ||
+          (isMember(companyId) && resource.data.employeeId == request.auth.uid);
+        // Employees create their own requests, same as always. Also
+        // allow manager/owner to create a request on an employee's
+        // behalf (e.g. logging a phone-called-in sick day, or backdated
+        // entry) — this only ADDS a capability on top of self-create,
+        // it doesn't relax who can read/approve/cancel one.
+        allow create: if (isMember(companyId) && request.resource.data.employeeId == request.auth.uid) ||
+          isManagerOrOwner(companyId);
+        // Approve/reject is manager+; an employee cancelling their own
+        // still-pending request is also an update to their own doc.
+        allow update: if isManagerOrOwner(companyId) ||
+          (isMember(companyId) && resource.data.employeeId == request.auth.uid);
+        allow delete: if false;
+      }
+      match /leaveTypes/{leaveTypeId} {
+        allow read: if isMember(companyId);
+        allow create, update, delete: if isOwner(companyId);
+      }
+      match /paidHolidays/{holidayId} {
+        allow read: if isMember(companyId);
+        allow create, update, delete: if isOwner(companyId);
+      }
+
+      // ---- messageThreads + nested messages
+      match /messageThreads/{threadId} {
+        // Literal participant membership OR company owner — the
+        // owner fallback exists because a thread created before a
+        // participant-list bug was fixed (e.g. crew threads that
+        // excluded owners not personally on that crew) can't be
+        // repaired without first being readable: syncing participants
+        // requires reading the thread, which the participant check
+        // alone would otherwise block. This also means an owner is
+        // never structurally locked out of their own company's
+        // internal communication, even if a similar gap shows up
+        // again later.
+        allow read: if isSignedIn() &&
+          (request.auth.uid in resource.data.participantUserIds || isOwner(companyId));
+        allow create: if isSignedIn() && request.auth.uid in request.resource.data.participantUserIds;
+        // Read receipts / participant list changes.
+        allow update: if isSignedIn() &&
+          (request.auth.uid in resource.data.participantUserIds || isOwner(companyId));
+        allow delete: if false;
+
+        match /messages/{messageId} {
+          function isThreadParticipant() {
+            return isSignedIn() &&
+              (request.auth.uid in get(/databases/$(database)/documents/companies/$(companyId)/messageThreads/$(threadId)).data.participantUserIds ||
+                isOwner(companyId));
+          }
+          allow read: if isThreadParticipant();
+          allow create: if isThreadParticipant() && request.resource.data.senderUserId == request.auth.uid;
+          // Editing/soft-deleting your own message only.
+          allow update: if isThreadParticipant() && resource.data.senderUserId == request.auth.uid;
+          allow delete: if false; // soft-delete via isDeleted flag only
+        }
+      }
+
+      // ---- announcements
+      match /announcements/{announcementId} {
+        allow read: if isMember(companyId);
+        allow create, update: if isManagerOrOwner(companyId);
+        allow delete: if false;
+      }
+
+      // ---- notifications: personal, but any company member can
+      // ---- create one targeting another member (e.g. a manager's
+      // ---- action notifying an employee).
+      match /notifications/{notificationId} {
+        allow read, update: if isSignedIn() && resource.data.userId == request.auth.uid;
+        allow create: if isMember(companyId);
+        allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      }
+
+      // ---- vehicles
+      match /vehicles/{vehicleId} {
+        allow read: if isMember(companyId);
+        allow create, update, delete: if isManagerOrOwner(companyId);
+      }
+
+      // ---- equipment
+      match /equipment/{equipmentId} {
+        allow read: if isMember(companyId);
+        allow create, update, delete: if isManagerOrOwner(companyId);
+      }
+
+      // ---- auditLog — company-scoped action history (role changes,
+      // employee archive/restore, job status changes). Genuinely
+      // immutable: no update or delete, ever, by anyone. Read access
+      // matches other company-scoped collections (member or platform
+      // admin — an admin auditing a company via the admin panel isn't
+      // necessarily a member of it). Creates come from CompanyService,
+      // EmployeeService, and JobService AFTER their own permission
+      // checks already passed, so any signed-in member can write —
+      // the rule doesn't need to duplicate that logic.
+      match /auditLog/{entryId} {
+        allow read: if isMember(companyId) || isPlatformAdmin();
+        allow create: if isMember(companyId);
+        allow update, delete: if false;
+      }
+
+      // ---- invitations (future invite-and-accept flow)
+      match /invitations/{invitationId} {
+        allow read, create, update: if isManagerOrOwner(companyId);
+        allow delete: if false;
+      }
+
+      // ---- devices: push notification tokens, strictly personal
+      match /devices/{deviceId} {
+        allow read, write: if isSignedIn() && resource.data.userId == request.auth.uid;
+        allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      }
+
+      // ---- auditLogs: append-only, owner-readable
+      match /auditLogs/{logId} {
+        allow read: if isOwner(companyId);
+        allow create: if isMember(companyId);
+        allow update, delete: if false;
+      }
+
+      // ---- settings (singleton doc: settings/company)
+      match /settings/{settingsDocId} {
+        allow read: if isMember(companyId);
+        allow write: if isManagerOrOwner(companyId);
+      }
+
+      // ---- feedback (legacy path, superseded by root supportTickets —
+      // ---- kept locked down since nothing should write here anymore)
+      match /feedback/{feedbackId} {
+        allow read, write: if false;
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Root: supportTickets/{ticketId}
+    // ------------------------------------------------------------------
+    match /supportTickets/{ticketId} {
+      allow read: if isPlatformAdmin() ||
+        (isSignedIn() && isMember(resource.data.companyId));
+      allow create: if isSignedIn() &&
+        request.resource.data.userId == request.auth.uid &&
+        isMember(request.resource.data.companyId);
+      // Per spec: companies can submit and view, never modify status —
+      // only platform admins can update a ticket.
+      allow update: if isPlatformAdmin();
+      // Per spec: nobody deletes tickets, including admins — Firestore
+      // is always the source of truth / permanent record.
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------------------
+    // Root: platformAuditLog/{entryId} — append-only admin action record
+    // ------------------------------------------------------------------
+    match /platformAuditLog/{entryId} {
+      allow read: if isPlatformAdmin();
+      allow create: if isPlatformAdmin();
+      // Immutable by design — an audit trail that can be edited or
+      // deleted after the fact isn't a real audit trail.
+      allow update, delete: if false;
+    }
+
+    // ------------------------------------------------------------------
+    // Root: platformAdmins/{uid} — the BlueJay Admin Panel gate itself
+    // ------------------------------------------------------------------
+    match /platformAdmins/{adminId} {
+      // Two separate cases: reading your OWN doc (to check your own
+      // admin status — this is what PlatformAdminService.getCurrentAdmin()
+      // does for every single account, admin or not, every time Settings
+      // loads) must always be allowed regardless of the answer, or
+      // checking "am I an admin?" becomes impossible for anyone who
+      // isn't one — the exact self-referential deny that broke Settings
+      // for every non-admin account. Reading someone ELSE's admin doc
+      // (the admin-management list) still requires actually being one.
+      allow read: if isPlatformAdmin() || (isSignedIn() && request.auth.uid == adminId);
+      // The bootstrap account may always create/heal its OWN doc
+      // (matches PlatformAdminService's self-healing logic exactly).
+      // Any other admin doc — granting a NEW admin, changing someone's
+      // role, deactivating someone — requires an existing superAdmin.
+      allow create, update: if (isBootstrapAdmin() && request.auth.uid == adminId) ||
+        isSuperAdmin();
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------------------
+    // Root: systemAnnouncements/{id} — BlueJay-to-everyone broadcasts.
+    // Read by any signed-in user (the banner shows to everyone in the
+    // main app, regardless of which company they're in). Write access
+    // is platform-admin at the rule level; SystemAnnouncementService
+    // enforces the finer super-admin-only requirement in app code.
+    // ------------------------------------------------------------------
+    match /systemAnnouncements/{announcementId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isPlatformAdmin();
+    }
+
+    // ------------------------------------------------------------------
+    // Root: featureFlags/{flagKey} — platform-level feature
+    // availability. Read by any signed-in user, since
+    // isFeatureEnabledForCompany() is meant to be called from
+    // anywhere in the main app, not just the admin panel. Write is
+    // platform-admin at the rule level; FeatureFlagService enforces
+    // super-admin-only in app code, same layering as system
+    // announcements above.
+    // ------------------------------------------------------------------
+    match /featureFlags/{flagKey} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isPlatformAdmin();
+    }
+
+    // ------------------------------------------------------------------
+    // Root: killSwitches/{switchKey} — emergency platform-wide "stop"
+    // for a critical system. Read by any signed-in user, since
+    // isKilled() needs to be checkable from anywhere in the main app
+    // before a disabled feature gets used. Write is platform-admin at
+    // the rule level; KillSwitchService enforces super-admin-only in
+    // app code, same layering as featureFlags and systemAnnouncements
+    // above — this is the highest blast-radius action in the admin
+    // panel, so the app-level bar is intentionally the strictest one.
+    // ------------------------------------------------------------------
+    match /killSwitches/{switchKey} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isPlatformAdmin();
+    }
+
+    // ------------------------------------------------------------------
+    // Root: pricingTiers/{tierKey} — what each CompanyPricingProgram
+    // tier actually includes (price, description). Unlike
+    // killSwitches/featureFlags, this is purely an admin-panel concern
+    // — regular company users have no legitimate reason to read
+    // internal pricing configuration, so both read and write are
+    // platform-admin at the rule level. PricingTierService enforces
+    // super-admin-only for writes in app code, same layering pattern
+    // as the other admin roadmap collections.
+    // ------------------------------------------------------------------
+    match /pricingTiers/{tierKey} {
+      allow read: if isPlatformAdmin();
+      allow create, update, delete: if isPlatformAdmin();
+    }
+  }
+}

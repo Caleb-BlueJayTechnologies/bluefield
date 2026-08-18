@@ -1,0 +1,57 @@
+rules_version = '2';
+
+// ============================================================================
+// BlueField Firebase Storage Rules
+// ============================================================================
+// This file never existed before — Storage had zero rules deployed,
+// which is why every screenshot upload attempt was failing (a bucket
+// with no rules denies everything by default). Mirrors the same
+// company-membership model as firestore.rules, since Storage rules
+// can't reference Firestore data directly without a paid Cloud
+// Functions round-trip — company membership is checked against
+// Firestore via firestore.get(), which Storage rules DO support.
+// ============================================================================
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isMember(companyId) {
+      return isSignedIn() &&
+        firestore.exists(/databases/(default)/documents/companies/$(companyId)/memberships/$(request.auth.uid)) &&
+        firestore.get(/databases/(default)/documents/companies/$(companyId)/memberships/$(request.auth.uid)).data.status == 'active';
+    }
+
+    function isPlatformAdmin() {
+      return isSignedIn() &&
+        firestore.exists(/databases/(default)/documents/platformAdmins/$(request.auth.uid)) &&
+        firestore.get(/databases/(default)/documents/platformAdmins/$(request.auth.uid)).data.active == true;
+    }
+
+    // supportTicketScreenshots/{companyId}/{ticketId}/{fileName}
+    // Matches SupportTicketService.uploadScreenshot's exact path.
+    match /supportTicketScreenshots/{companyId}/{ticketId}/{fileName} {
+      allow read: if isMember(companyId) || isPlatformAdmin();
+      allow write: if isMember(companyId);
+      allow delete: if false;
+    }
+
+    // Reserved for future use (profile photos, job photos, etc.) —
+    // not currently written by the app, but scoped the same way so
+    // adding a new upload feature later doesn't require another
+    // Storage rules deploy just to make it work at all.
+    match /companies/{companyId}/{allPaths=**} {
+      allow read: if isMember(companyId) || isPlatformAdmin();
+      allow write: if isMember(companyId);
+      allow delete: if false;
+    }
+
+    // Deny everything else by default.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

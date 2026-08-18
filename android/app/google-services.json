@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "903012762212",
+    "firebase_url": "https://bluefield-f9eb9-default-rtdb.firebaseio.com",
+    "project_id": "bluefield-f9eb9",
+    "storage_bucket": "bluefield-f9eb9.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:903012762212:android:9b9242f2148e4b70c49571",
+        "android_client_info": {
+          "package_name": "com.bluejaytechnologies.bluefield"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDQnO_j9K0A2B9pZcTmkq74h_3nQkhw180"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

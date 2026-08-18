@@ -1,0 +1,81 @@
+name: bluefield_test
+description: "A new Flutter project."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  firebase_core: ^4.11.0
+  firebase_auth: ^6.5.3
+  cloud_firestore: ^6.6.0
+  url_launcher: ^6.3.2
+  firebase_storage: ^13.4.3
+  image_picker: ^1.1.2
+  package_info_plus: ^8.1.2
+  device_info_plus: ^11.2.0
+  pdf: ^3.11.1
+  printing: ^5.13.4
+  geolocator: ^13.0.2
+  crypto: ^3.0.6
+  local_auth: ^2.3.0
+  flutter_secure_storage: ^9.2.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.3
+
+# flutter_secure_storage_windows (a transitive dependency pulled in by
+# flutter_secure_storage above, needed for Android/iOS credential
+# storage) depends on the full path_provider package rather than
+# path_provider_windows directly — which drags in path_provider's
+# Apple implementation (path_provider_foundation) regardless of build
+# target. Since path_provider_foundation 2.6.0+, that package ships a
+# native build "hook" using package:objective_c, and Dart's tooling for
+# building those hooks has a currently-open bug (dart-lang/native#2993)
+# that fails on Windows whenever the project sits under a path
+# containing spaces — which breaks EVERY `flutter run`/`flutter build`
+# on a Windows dev machine, not just Windows-targeted builds, the
+# moment path_provider_foundation 2.6.0+ is anywhere in the resolved
+# dependency graph. This app never actually runs on Windows desktop, so
+# path_provider_foundation's real (Apple) implementation is never
+# exercised here either way — pinning it to the last version before
+# the objective_c/native-assets rewrite sidesteps the bug entirely
+# without losing any functionality this app uses. Safe to remove once
+# the upstream Dart SDK bug is fixed in a released Flutter version.
+dependency_overrides:
+  path_provider_foundation: 2.4.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
+    - assets/icon/
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/app_icon_source.png"
+  min_sdk_android: 21
+  web:
+    generate: true
+    image_path: "assets/icon/app_icon_source.png"
+    background_color: "#ffffff"
+    theme_color: "#1E88E5"
+  windows:
+    generate: true
+    image_path: "assets/icon/app_icon_source.png"
+  macos:
+    generate: true
+    image_path: "assets/icon/app_icon_source.png"
