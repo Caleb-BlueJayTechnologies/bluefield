@@ -1,11 +1,11 @@
 {
-    "name": "bluefield_test",
-    "short_name": "bluefield_test",
+    "name": "BlueField",
+    "short_name": "BlueField",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#ffffff",
     "theme_color": "#1E88E5",
-    "description": "A new Flutter project.",
+    "description": "Workforce management for field-service companies.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
