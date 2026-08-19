@@ -43,3 +43,12 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+/android/build/
+
+# Signing keystore/credentials — belt-and-suspenders on top of
+# android/.gitignore's own rules, in case one ever ends up outside the
+# android/ folder (as bluefield-release.jks briefly did) rather than
+# strictly inside it.
+*.jks
+*.keystore
+key.properties
